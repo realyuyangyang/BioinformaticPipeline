@@ -1,0 +1,203 @@
+# PE RNA-seq
+SHELL := /bin/bash
+
+WORKDIR ?= .
+# 生成绝对路径
+ifeq ($(WORKDIR),.)
+ override WORKDIR := $(shell readlink -f $(WORKDIR))
+endif
+
+SAMPLES_DIR := $(WORKDIR)/input
+RESULTDIR := $(WORKDIR)/Result
+THREADS ?= 10
+
+# ENSEMBL 110
+GTF := /home/data/t230433/db/ref/Homo_sapiens.GRCh38.110.gtf
+Index := /home/data/t230433/db/ref/hisat2_grch38/hisat2_genome
+
+# 输入数据fastq处理
+R1_SUFFIXES := _1.fastq.gz
+R2_SUFFIXES := _2.fastq.gz
+
+SAMPLES_R1 := $(wildcard $(SAMPLES_DIR)/*$(R1_SUFFIXES))
+SAMPLES_R2 := $(wildcard $(SAMPLES_DIR)/*$(R2_SUFFIXES))
+
+# 被替换部分如果写为''则无法正确并行，且报错无法解析
+SAMPLE_NAMES := $(foreach sample_r1, $(SAMPLES_R1), $(subst $(R1_SUFFIXES), , $(notdir $(sample_r1))))
+
+.PHONY: run_test test check_dir raw_fastqc fastp clean_fastqc map_hisat2 count_featureCounts count2fpkm
+
+run_all: raw_fastqc fastp clean_fastqc map_hisat2 count_featureCounts count2fpkm
+
+run_test: test check_dir check_soft
+
+raw_fastqc: $(patsubst %, $(RESULTDIR)/%/Raw_data/Stat/%_1_fastqc.zip, $(SAMPLE_NAMES)) \
+  $(patsubst %, $(RESULTDIR)/%/Raw_data/Stat/%_2_fastqc.zip, $(SAMPLE_NAMES))
+fastp: raw_fastqc $(patsubst %, $(RESULTDIR)/%/Clean_data/%_fastp_1.fastq.gz, $(SAMPLE_NAMES)) \
+  $(patsubst %, $(RESULTDIR)/%/Clean_data/%_fastp_2.fastq.gz, $(SAMPLE_NAMES))
+clean_fastqc: fastp $(patsubst %, $(RESULTDIR)/%/Clean_data/Stat/%_Clean_1_fastqc.zip, $(SAMPLE_NAMES)) \
+  $(patsubst %, $(RESULTDIR)/%/Clean_data/Stat/%_Clean_2_fastqc.zip, $(SAMPLE_NAMES))
+map_hisat2: fastp $(patsubst %, $(RESULTDIR)/%/MAP_hisat2/%_hisat2.sort.bam, $(SAMPLE_NAMES))
+count_featureCounts: map_hisat2 $(patsubst %, $(RESULTDIR)/%/featureCounts/known_genes/%_gene_level.count, $(SAMPLE_NAMES)) \
+  $(patsubst %, $(RESULTDIR)/%/featureCounts/known_transcripts/%_transcript_level.count, $(SAMPLE_NAMES))
+count2fpkm: $(RESULTDIR)/data/FPKM_TPM/ALL_Samples_gene_Counts.xls $(RESULTDIR)/data/FPKM_TPM/ALL_Samples_transcript_Counts.xls
+
+test:
+ @echo SHELL: $(SHELL)
+ @echo WORKDIR: $(WORKDIR)
+ @echo GTF: $(GTF)
+ @echo Hisat2 Index: $(Index)
+ @echo R1_SUFFIXES: $(R1_SUFFIXES)
+ @echo R2_SUFFIXES: $(R2_SUFFIXES)
+ @echo SAMPLES_R1: $(SAMPLES_R1)
+ @echo SAMPLES_R2: $(SAMPLES_R2)
+ @echo SAMPLE_NAMES: $(SAMPLE_NAMES)
+
+check_dir:
+ @test -d $(WORKDIR) && echo WORKDIR: $(WORKDIR) || echo "NotFindDir: $(WORKDIR)"
+ @test -d $(RESULTDIR) && echo RESULTDIR: $(RESULTDIR) || \
+ { mkdir -p $(RESULTDIR) && echo "RESULTDIR: mkdir $(RESULTDIR)"; }
+
+check_soft:
+ @ # 测试时异常状态返回码为2，并不是这里写的1。make状态返回码需要进一步学习。
+ @which fastqc > /dev/null && echo "OK: Software fastqc" || { echo "ERROR: NotFindSoft fastqc" 2>&1 && exit 1; }
+ @which fastp > /dev/null && echo "OK: Software fastp" || { echo "ERROR: NotFindSoft fastp" 2>&1 && exit 1; }
+ @which hisat2 > /dev/null && echo "OK: Software hisat2" || { echo "ERROR: NotFindSoft hisat2" 2>&1 && exit 1; }
+ @which featureCounts > /dev/null && echo "OK: Software featureCounts" || { echo "ERROR: NotFindSoft featureCounts" 2>&1 && exit 1; }
+ @which run_merge_fc_counts_normalization_v0.02.R > /dev/null && echo "OK: Script run_merge_fc_counts_normalization_v0.02.R" || { echo "ERROR: NotFindScript run_merge_fc_counts_normalization_v0.02.R" 2>&1 && exit 1; }
+
+# Raw_data QC fastqc
+## $@ 并不能扩展一个文件多个位置的%? 明写目标文件，用内部变量$*
+## echo 提示内容加上
+$(RESULTDIR)/%/Raw_data/Stat/%_1_fastqc.zip: $(SAMPLES_DIR)/%$(R1_SUFFIXES)
+ $(eval Raw_R1_end_log := $(RESULTDIR)/$*/Raw_data/end_log/$*_1_fastqc.end_log)
+ @mkdir -p $(RESULTDIR)/$*/Raw_data/end_log && \
+ mkdir -p $(@D) && \
+ echo "# Running Raw_data FastQC for $* R1" && \
+ test -f $(Raw_R1_end_log) && \
+ echo "# OK: $(RESULTDIR)/$*/Raw_data/Stat/$*_1_fastqc.zip" || \
+ { fastqc -t $(THREADS) -o $(RESULTDIR)/$*/Raw_data/Stat/ $< \
+  > $(@D)/$*_Raw_1_fastqc.o 2> $(@D)/$*_Raw_1_fastqc.e && \
+ touch $(Raw_R1_end_log); \
+ }
+
+$(RESULTDIR)/%/Raw_data/Stat/%_2_fastqc.zip: $(SAMPLES_DIR)/%$(R2_SUFFIXES)
+ $(eval Raw_R2_end_log := $(RESULTDIR)/$*/Raw_data/end_log/$*_2_fastqc.end_log)
+ @mkdir -p $(RESULTDIR)/$*/Raw_data/end_log && \
+ mkdir -p $(@D) && \
+ echo "# Running Raw_data FastQC for $* R2" && \
+ test -f $(Raw_R2_end_log) && \
+ echo "# OK: $(RESULTDIR)/$*/Raw_data/Stat/$*_2_fastqc.zip" || \
+ { fastqc -t $(THREADS) -o $(RESULTDIR)/$*/Raw_data/Stat/ $< \
+  > $(@D)/$*_Raw_2_fastqc.o 2> $(@D)/$*_Raw_2_fastqc.e && \
+ touch $(Raw_R2_end_log); \
+ }
+
+# Clean_data fastp
+$(RESULTDIR)/%/Clean_data/%_fastp_1.fastq.gz $(RESULTDIR)/%/Clean_data/%_fastp_2.fastq.gz: $(SAMPLES_DIR)/%$(R1_SUFFIXES) $(SAMPLES_DIR)/%$(R2_SUFFIXES)
+ $(eval fastp_end_log := $(@D)/end_log/$*_fastp.end_log)
+ @mkdir -p $(@D)/end_log && \
+ mkdir -p $(@D)/Stat && \
+ echo "# Running Clean_data fastp for $*" && \
+ test -f $(fastp_end_log) && \
+ echo "# OK: $(RESULTDIR)/$*/Clean_data/$*_fastp_1.fastq.gz" || \
+ { fastp --compression 6 -l 36 -q 20 -w $(THREADS) -i $(SAMPLES_DIR)/$*$(R1_SUFFIXES) -I $(SAMPLES_DIR)/$*$(R2_SUFFIXES) \
+  -o $(RESULTDIR)/$*/Clean_data/$*_fastp_1.fastq.gz -O $(RESULTDIR)/$*/Clean_data/$*_fastp_2.fastq.gz \
+  -h $(RESULTDIR)/$*/Clean_data/Stat/$*_fastp.html -j $(RESULTDIR)/$*/Clean_data/Stat/$*_fastp.json \
+  > $(@D)/$*_fastp.o 2> $(@D)/$*_fastp.e && \
+ touch $(fastp_end_log); \
+ }
+
+# Clean_data QC fastqc
+## echo 提示内容加上 `#`
+$(RESULTDIR)/%/Clean_data/Stat/%_Clean_1_fastqc.zip: $(RESULTDIR)/%/Clean_data/%_fastp_1.fastq.gz
+ $(eval Clean_R1_end_log := $(RESULTDIR)/$*/Clean_data/end_log/$*_Clean_1_fastqc.end_log)
+ @mkdir -p $(RESULTDIR)/$*/Clean_data/end_log && \
+ mkdir -p $(RESULTDIR)/$*/Clean_data/Stat/ && \
+ echo "# Running Clean_data FastQC for $* R1" && \
+ test -f $(Clean_R1_end_log) && \
+ echo "# OK: $(RESULTDIR)/$*/Clean_data/Stat/$*_Clean_1_fastqc.zip" || \
+ { fastqc -t $(THREADS) -o $(RESULTDIR)/$*/Clean_data/Stat/ $(RESULTDIR)/$*/Clean_data/$*_fastp_1.fastq.gz \
+  > $(@D)/$*_Clean_1_fastqc.o 2> $(@D)/$*_Clean_1_fastqc.e && \
+ touch $(Clean_R1_end_log); \
+ }
+
+$(RESULTDIR)/%/Clean_data/Stat/%_Clean_2_fastqc.zip: $(RESULTDIR)/%/Clean_data/%_fastp_2.fastq.gz
+ $(eval Clean_R2_end_log := $(RESULTDIR)/$*/Clean_data/end_log/$*_Clean_2_fastqc.end_log)
+ @mkdir -p $(RESULTDIR)/$*/Clean_data/end_log && \
+ mkdir -p $(RESULTDIR)/$*/Clean_data//Stat && \
+ echo "# Running Clean_data FastQC for $* R2" && \
+ test -f $(Clean_R2_end_log) && \
+ echo "# OK: $(RESULTDIR)/$*/Clean_data/$*_Clean_2_fastqc.zip" || \
+ { fastqc -t $(THREADS) -o $(RESULTDIR)/$*/Clean_data/Stat/ $(RESULTDIR)/$*/Clean_data/$*_fastp_2.fastq.gz \
+  > $(@D)/$*_Clean_2_fastqc.o 2> $(@D)/$*_Clean_2_fastqc.e && \
+ touch $(Clean_R2_end_log); \
+ }
+
+# MAP_hisat2 hisat2 mapping
+$(RESULTDIR)/%/MAP_hisat2/%_hisat2.sort.bam: $(RESULTDIR)/%/Clean_data/%_fastp_1.fastq.gz $(RESULTDIR)/%/Clean_data/%_fastp_2.fastq.gz
+ $(eval MAP_hisat2_end_log := $(@D)/$*_MAP_hisat2.end_log)
+ @mkdir -p $(@D)/end_log && \
+ echo "# Running MAP_hisat2 hisat2 for $*" && \
+ test -f $(MAP_hisat2_end_log) && \
+ echo "# OK: $(RESULTDIR)/$*/MAP_hisat2/$*_hisat2.sort.bam" || \
+ { rm -rf $(RESULTDIR)/$*/MAP_hisat2/$*_hisat2.sort.bam.tmp* && \
+  hisat2 --new-summary --dta -p $(THREADS) -x $(Index) \
+  -1 $(RESULTDIR)/$*/Clean_data/$*_fastp_1.fastq.gz -2 $(RESULTDIR)/$*/Clean_data/$*_fastp_2.fastq.gz \
+  --summary-file $(RESULTDIR)/$*/MAP_hisat2/$*_hisat2_mapping.log \
+  | samtools sort -m 2G -@ $(THREADS) -o $(RESULTDIR)/$*/MAP_hisat2/$*_hisat2.sort.bam && \
+  samtools index  -b -@ $(THREADS) $(RESULTDIR)/$*/MAP_hisat2/$*_hisat2.sort.bam \
+  > $(@D)/$*_MAP_hisat2.o 2> $(@D)/$*_MAP_hisat2.e && \
+ touch $(MAP_hisat2_end_log); \
+ }
+
+# Count featureCounts gene_level
+$(RESULTDIR)/%/featureCounts/known_genes/%_gene_level.count: $(RESULTDIR)/%/MAP_hisat2/%_hisat2.sort.bam
+ $(eval fc_gene_end_log := $(RESULTDIR)/$*/featureCounts/end_log/$*_count_gene_featureCounts.end_log)
+ @mkdir -p $(RESULTDIR)/$*/featureCounts/end_log && \
+ mkdir -p $(RESULTDIR)/$*/featureCounts/known_genes && \
+ echo "# Running Count gene featureCounts for $*" && \
+ test -f $(fc_gene_end_log) && \
+ echo "# OK: $(RESULTDIR)/$*/featureCounts/known_genes/$*_gene_level.count" || \
+ { featureCounts -T $(THREADS) -p -B  -t exon  -g gene_id -a $(GTF) \
+  -o $(RESULTDIR)/$*/featureCounts/known_genes/$*_gene_level.count $(RESULTDIR)/$*/MAP_hisat2/$*_hisat2.sort.bam \
+  > $(@D)/$*_count_gene_featureCounts.o 2> $(@D)/$*_count_gene_featureCounts.e && \
+ touch $(fc_gene_end_log); \
+ }
+
+# Count featureCounts gene_level
+$(RESULTDIR)/%/featureCounts/known_transcripts/%_transcript_level.count: $(RESULTDIR)/%/MAP_hisat2/%_hisat2.sort.bam
+ $(eval fc_transcript_end_log := $(RESULTDIR)/$*/featureCounts/end_log/$*_count_transcript_featureCounts.end_log)
+ @mkdir -p $(RESULTDIR)/$*/featureCounts/end_log && \
+ mkdir -p $(RESULTDIR)/$*/featureCounts/known_transcripts && \
+ echo "# Running Count transcript featureCounts for $*" && \
+ test -f $(fc_transcript_end_log) && \
+ echo "# OK: $(RESULTDIR)/$*/featureCounts/known_transcripts/$*_transcript_level.count" || \
+ { featureCounts -T $(THREADS) -p -B  -t exon  -g transcript_id -a $(GTF) \
+  -o $(RESULTDIR)/$*/featureCounts/known_transcripts/$*_transcript_level.count $(RESULTDIR)/$*/MAP_hisat2/$*_hisat2.sort.bam \
+  > $(@D)/$*_count_transcript_featureCounts.o 2> $(@D)/$*_count_transcript_featureCounts.e && \
+ touch $(fc_transcript_end_log); \
+ }
+
+# Count 2 FPKM : gene
+$(RESULTDIR)/data/FPKM_TPM/ALL_Samples_gene_Counts.xls: $(patsubst %, $(RESULTDIR)/%/featureCounts/known_genes/%_gene_level.count, $(SAMPLE_NAMES))
+ $(eval all_fpkm_end_log := $(@D)/end_log/ALL_Samples_gene_Count2FPKM.end_log)
+ @mkdir -p $(@D)/end_log && \
+ echo "# Running genes Count 2 FPKM & TPM for $(SAMPLE_NAMES)" && \
+ echo "# Intput: $$(ls $(RESULTDIR)/*/featureCounts/known_genes/*_gene_level.count | xargs |sed 's# #,#g' ) " && \
+ [[ -f $(all_fpkm_end_log) ]] || \
+ { run_merge_fc_counts_normalization_v0.02.R -i $$(ls $(RESULTDIR)/*/featureCounts/known_genes/*_gene_level.count | xargs |sed 's# #,#g' ) \
+   -o $(@D) -f ALL_Samples_gene -p _gene_level.count && \
+ touch $(all_fpkm_end_log); \
+ }
+ 
+$(RESULTDIR)/data/FPKM_TPM/ALL_Samples_transcript_Counts.xls: $(patsubst %, $(RESULTDIR)/%/featureCounts/known_transcripts/%_transcript_level.count, $(SAMPLE_NAMES))
+ $(eval all_fpkm_end_log := $(@D)/end_log/ALL_Samples_transcript_Count2FPKM.end_log)
+ @mkdir -p $(@D)/end_log && \
+ echo "# Running transcripts Count 2 FPKM & TPM for $(SAMPLE_NAMES)" && \
+ echo "# Intput: $$(ls $(RESULTDIR)/*/featureCounts/known_transcripts/*_transcript_level.count | xargs |sed 's# #,#g' ) " && \
+ [[ -f $(all_fpkm_end_log) ]] || \
+ { run_merge_fc_counts_normalization_v0.02.R -i $$(ls $(RESULTDIR)/*/featureCounts/known_transcripts/*_transcript_level.count | xargs |sed 's# #,#g' ) \
+   -o $(@D) -f ALL_Samples_transcript -p _transcript_level.count && \
+ touch $(all_fpkm_end_log); \
+ }
